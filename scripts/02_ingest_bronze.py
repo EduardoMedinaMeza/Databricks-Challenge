@@ -65,11 +65,6 @@ def parse_header(header: str):
     return sep, names
 
 
-spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
-spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
-
 familias = {}
 for path in glob.glob(f"{CSV_DIR}/**/*.csv", recursive=True):
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -105,7 +100,8 @@ extras = [c for c in bronze.columns if c not in CANON]
 bronze = bronze.select(*ordered, *extras)
 
 (
-    bronze.write.format("delta")
+    bronze.coalesce(8)
+    .write.format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
     .saveAsTable(TABLE)
