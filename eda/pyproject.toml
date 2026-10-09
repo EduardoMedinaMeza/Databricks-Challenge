@@ -1,0 +1,24 @@
+[project]
+name = "eda"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Eduardo", email = "edumemeza@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "databricks-sql-connector[pyarrow]>=4.6.0",
+    "matplotlib>=3.11.2",
+    "pandas>=3.0.6",
+    "pyarrow>=26.0.0",
+    "python-dotenv>=1.2.4",
+    "quarto>=0.1.0",
+]
+
+[project.scripts]
+eda = "eda:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"

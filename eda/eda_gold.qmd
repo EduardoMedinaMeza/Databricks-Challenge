@@ -1,0 +1,54 @@
+---
+title: "EDA — gold"
+format: html
+jupyter: python3
+execute:
+  echo: true
+---
+
+El SQL corre **en Databricks**. A local solo baja el resultado chico (agregados / `LIMIT`).
+
+```{python}
+import os
+from dotenv import load_dotenv
+from databricks import sql
+import pandas as pd
+
+load_dotenv("../.env")
+
+GOLD = os.environ.get("GOLD_TABLE", "workspace.default.gold_ventas")
+
+conn = sql.connect(
+    server_hostname=os.environ["DATABRICKS_HOST"].replace("https://", ""),
+    http_path=os.environ["DATABRICKS_HTTP_PATH"],
+    access_token=os.environ["DATABRICKS_TOKEN"],
+)
+
+def q(sql_text: str) -> pd.DataFrame:
+    with conn.cursor() as cur:
+        cur.execute(sql_text)
+        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description]
+    return pd.DataFrame(rows, columns=cols)
+```
+
+```{python}
+# Esquema y volumen (1 fila). No hagas SELECT * de 100M filas.
+q(f"DESCRIBE TABLE {GOLD}")
+```
+
+```{python}
+q(f"SELECT COUNT(*) AS filas FROM {GOLD}")
+```
+
+```{python}
+# Cambia el GROUP BY según las columnas reales de gold
+df = q(
+    f"""
+    SELECT *
+    FROM {GOLD}
+    LIMIT 1000
+    """
+)
+df.head()
+```
