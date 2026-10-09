@@ -1,4 +1,9 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
+# Databricks notebook source
 # 3 encabezados CSV → 1 tabla Delta. Una sola acción de escritura.
 
 import csv
@@ -6,7 +11,7 @@ import glob
 import re
 from io import StringIO
 
-from pyspark.sql.functions import input_file_name, lit
+from pyspark.sql.functions import col, lit
 from pyspark.sql.types import StringType, StructField, StructType
 
 CSV_DIR = "/Volumes/workspace/default/raw/csv"
@@ -86,7 +91,7 @@ for (sep, names), paths in familias.items():
         .option("encoding", "UTF-8")
         .load(paths)
         .withColumn("_n_cols", lit(len(names)))
-        .withColumn("_source_file", input_file_name())
+        .withColumn("_source_file", col("_metadata.file_path"))
     )
     dfs.append(df_g)
     print(f"familia {len(names)} cols × {len(paths)} archivos")
@@ -109,3 +114,19 @@ bronze = bronze.select(*ordered, *extras)
 
 print(f"lista {TABLE}")
 spark.table(TABLE).printSchema()
+
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT
+# MAGIC   COUNT(*) AS filas,
+# MAGIC   SUM(CAST(quantity AS DOUBLE)) AS unidades,
+# MAGIC   SUM(CASE WHEN CAST(quantity AS DOUBLE) > 1
+# MAGIC            THEN CAST(quantity AS DOUBLE) - 1 ELSE 0 END) AS extras_por_partir,
+# MAGIC   SUM(CASE
+# MAGIC         WHEN CAST(quantity AS DOUBLE) IS NULL OR CAST(quantity AS DOUBLE) < 1 THEN 1
+# MAGIC         WHEN CAST(quantity AS DOUBLE) > 50 THEN 50
+# MAGIC         ELSE CAST(CAST(quantity AS DOUBLE) AS INT)
+# MAGIC       END) AS filas_esperadas_despues
+# MAGIC FROM workspace.default.silver_ventas VERSION AS OF 0
