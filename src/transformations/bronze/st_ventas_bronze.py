@@ -77,7 +77,9 @@ for path in glob.glob(f"{CSV_DIR}/**/*.csv", recursive=True):
     familias.setdefault(parse_header(header), []).append(path)
 
 if not familias:
-    raise FileNotFoundError(f"no hay CSV en {CSV_DIR}; corre primero scripts/01_extract_csv")
+    raise FileNotFoundError(
+        f"no hay CSV en {CSV_DIR}; corre primero src/transformations/bronze/extract_csv"
+    )
 
 dfs = []
 for (sep, names), paths in familias.items():

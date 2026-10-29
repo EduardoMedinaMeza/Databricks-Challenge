@@ -10,11 +10,16 @@ El SQL corre **en Databricks**. A local solo baja el resultado chico (agregados 
 
 ```{python}
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 from databricks import sql
 import pandas as pd
 
-load_dotenv("../.env")
+_p = Path.cwd().resolve()
+for _ in range(8):
+    load_dotenv(_p / ".env")
+    _p = _p.parent
 
 GOLD = os.environ.get("GOLD_TABLE", "workspace.default.gold_ventas")
 

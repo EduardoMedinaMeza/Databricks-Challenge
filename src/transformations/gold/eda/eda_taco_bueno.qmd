@@ -1,0 +1,492 @@
+---
+title: "Taco Bueno POS — EDA for presentation"
+subtitle: "Bronze vs silver vs gold, then exploratory analysis of gold"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    embed-resources: true
+jupyter: python3
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+#| label: setup
+from pathlib import Path
+import os
+import re
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+plt.rcParams.update({"figure.figsize": (8, 4), "axes.grid": True, "grid.alpha": 0.3})
+
+GOLD_DEFAULT = "workspace.default.gold_ventas"
+NUM_RE = re.compile(r"int|long|double|float|decimal|numeric|smallint|tinyint", re.I)
+TS_RE = re.compile(r"date|time", re.I)
+
+
+def q(conn, sql_text: str) -> pd.DataFrame:
+    with conn.cursor() as cur:
+        cur.execute(sql_text)
+        cols = [c[0] for c in cur.description]
+        return pd.DataFrame(cur.fetchall(), columns=cols)
+
+
+def ident(name: str) -> str:
+    return "`" + str(name).replace("`", "") + "`"
+
+
+def load_gold_eda():
+    out = {
+        "ok": False,
+        "gold": GOLD_DEFAULT,
+        "n": None,
+        "describe": None,
+        "nulls": None,
+        "numeric": None,
+        "cats": {},
+        "sample": None,
+        "preview": None,
+        "tables": [],
+        "error": None,
+    }
+    try:
+        from dotenv import load_dotenv
+        from databricks import sql
+
+        p = Path.cwd().resolve()
+        for _ in range(8):
+            load_dotenv(p / ".env")
+            p = p.parent
+        host = os.environ.get("DATABRICKS_HOST", "").replace("https://", "").split("/")[0]
+        path = os.environ.get("DATABRICKS_HTTP_PATH", "")
+        token = os.environ.get("DATABRICKS_TOKEN", "")
+        gold = os.environ.get("GOLD_TABLE", GOLD_DEFAULT) or GOLD_DEFAULT
+        out["gold"] = gold
+        if not token or not path.startswith("/sql/"):
+            out["error"] = "Invalid .env: need DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/... and a token."
+            return out
+        conn = sql.connect(server_hostname=host, http_path=path, access_token=token)
+        tables = q(conn, "SHOW TABLES IN workspace.default")
+        name_col = "tableName" if "tableName" in tables.columns else tables.columns[-1]
+        out["tables"] = tables[name_col].astype(str).tolist()
+        short = gold.split(".")[-1].lower()
+        if short not in {t.lower() for t in out["tables"]}:
+            hit = next((t for t in out["tables"] if "gold" in t.lower()), None)
+            if hit:
+                gold = f"workspace.default.{hit}"
+                out["gold"] = gold
+            else:
+                out["error"] = f"{gold} not in workspace.default. Tables: {out['tables']}"
+                conn.close()
+                return out
+
+        out["n"] = int(q(conn, f"SELECT COUNT(*) AS n FROM {gold}")["n"].iloc[0])
+        desc = q(conn, f"DESCRIBE TABLE {gold}")
+        desc = desc.rename(columns={desc.columns[0]: "col_name", desc.columns[1]: "data_type"})
+        desc = desc[~desc["col_name"].astype(str).str.startswith("#")].copy()
+        out["describe"] = desc
+
+        cols = [str(c) for c in desc["col_name"] if str(c).strip()]
+        nn = ", ".join(f"COUNT({ident(c)}) AS {ident(c)}" for c in cols)
+        nn_df = q(conn, f"SELECT COUNT(*) AS _n, {nn} FROM {gold}")
+        n = int(nn_df["_n"].iloc[0])
+        rows = []
+        for c in cols:
+            filled = int(nn_df[c].iloc[0])
+            rows.append({"column": c, "non_null": filled, "nulls": n - filled, "pct_null": round(100 * (n - filled) / n, 2) if n else 0})
+        out["nulls"] = pd.DataFrame(rows)
+
+        num_cols, cat_cols = [], []
+        for _, r in desc.iterrows():
+            t = str(r["data_type"])
+            c = str(r["col_name"])
+            if NUM_RE.search(t):
+                num_cols.append(c)
+            elif not TS_RE.search(t):
+                cat_cols.append(c)
+
+        if num_cols:
+            parts = []
+            for c in num_cols:
+                ic = ident(c)
+                parts += [
+                    f"AVG(CAST({ic} AS DOUBLE)) AS {ident(c+'_avg')}",
+                    f"MIN(CAST({ic} AS DOUBLE)) AS {ident(c+'_min')}",
+                    f"MAX(CAST({ic} AS DOUBLE)) AS {ident(c+'_max')}",
+                ]
+            raw = q(conn, f"SELECT {', '.join(parts)} FROM {gold}")
+            stats = []
+            for c in num_cols:
+                stats.append({
+                    "column": c,
+                    "mean": raw[c + "_avg"].iloc[0],
+                    "min": raw[c + "_min"].iloc[0],
+                    "max": raw[c + "_max"].iloc[0],
+                })
+            out["numeric"] = pd.DataFrame(stats)
+
+        for c in cat_cols[:10]:
+            out["cats"][c] = q(
+                conn,
+                f"SELECT CAST({ident(c)} AS STRING) AS value, COUNT(*) AS n FROM {gold} GROUP BY 1 ORDER BY n DESC LIMIT 20",
+            )
+
+        lim = 20_000 if out["n"] > 20_000 else out["n"]
+        out["preview"] = q(conn, f"SELECT * FROM {gold} LIMIT 5")
+        if num_cols:
+            sel = ", ".join(ident(c) for c in num_cols)
+            out["sample"] = q(conn, f"SELECT {sel} FROM {gold} LIMIT {int(lim)}")
+        out["ok"] = True
+        conn.close()
+    except Exception as e:
+        msg = str(e)
+        if "daily limit" in msg.lower():
+            out["error"] = "Databricks free daily limit. Re-render this file tomorrow with the warehouse Running."
+        else:
+            out["error"] = msg.split("BAD_REQUEST:")[-1].strip()[:500]
+    return out
+
+
+import concurrent.futures
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+    _fut = _pool.submit(load_gold_eda)
+    try:
+        eda = _fut.result(timeout=20)
+    except concurrent.futures.TimeoutError:
+        eda = {
+            "ok": False,
+            "gold": os.environ.get("GOLD_TABLE", GOLD_DEFAULT),
+            "n": None,
+            "describe": None,
+            "nulls": None,
+            "numeric": None,
+            "cats": {},
+            "sample": None,
+            "preview": None,
+            "tables": [],
+            "error": "Timed out talking to Databricks (warehouse stopped or daily limit).",
+        }
+
+GOLD = eda["gold"]
+```
+
+```{python}
+print("Gold live status:", "OK" if eda["ok"] else eda["error"])
+if eda["ok"]:
+    print(f"{eda['gold']}: {eda['n']:,} rows, {len(eda['describe'])} columns")
+```
+
+# Executive summary
+
+Restaurant POS line items (Taco Bueno *Pricing*). **598 CSV files**, three evolving headers, loaded into a Unity Catalog medallion:
+
+| Layer | Table | Rows (measured) | Grain |
+|---|---|---|---|
+| **Bronze** | `workspace.default.bronze_ventas` | **85,180,477** | One POS line (qty may be 1, 2, 3…) |
+| **Silver** | `workspace.default.silver_ventas` | **100,336,580** | One **unit** (`quantity = 1`) |
+| **Gold** | `workspace.default.gold_ventas` | live query below | Analytics grain (should be aggregated) |
+
+```{python}
+#| label: fig-medallion-rows
+#| fig-cap: "Row counts by medallion layer (gold filled when the warehouse answers)."
+layers = pd.DataFrame({
+    "layer": ["Bronze", "Silver", "Gold"],
+    "rows": [
+        85_180_477,
+        100_336_580,
+        (eda["n"] if eda["ok"] and eda["n"] is not None else 0),
+    ],
+})
+ax = layers.plot.bar(x="layer", y="rows", legend=False, color=["#8a8a8a", "#c45c26", "#2f6f4e"])
+ax.set_ylabel("rows")
+ax.set_xlabel("")
+ax.yaxis.set_major_formatter(lambda x, p: f"{x/1e6:.0f} M")
+plt.xticks(rotation=0)
+if not eda["ok"]:
+    ax.set_title("Gold bar = 0 because warehouse did not answer (re-render tomorrow)")
+plt.tight_layout()
+plt.show()
+```
+
+**What to remember for the talk**
+
+1. Same business table, **three CSV shapes** — never `read.csv` the whole folder as one schema.
+2. Silver **explodes** qty>1 so mix and wait-time KPIs are per unit.
+3. **7.67M** bronze/silver-v0 lines had `quantity = 0` (voids) and were stored as 1 — filter voids before “units sold”.
+4. Gold is **not** in `raw/` (that folder is the zip). Gold is a catalog table.
+5. Catalog Sample data (100 or 7,053 rows) is **not** the table.
+
+```{mermaid}
+flowchart LR
+  A["598 CSVs / 3 headers"] --> B["Bronze\n85.2M POS lines"]
+  B --> S["Silver\n100.3M units"]
+  S --> G["Gold\nanalytics"]
+```
+
+# Bronze vs silver vs gold
+
+## Side-by-side
+
+| | Bronze | Silver | Gold |
+|---|---|---|---|
+| **Role** | Raw landing, all strings, keep source files | Clean grain for units | What we present / model |
+| **How built** | 3 header families + `unionByName` | Explode qty; drop some cols; add wait time | Aggregates from silver (team table) |
+| **Rows** | 85,180,477 | 100,336,580 | live `COUNT(*)` |
+| **`quantity`** | Mixed 0 / 1 / 2 / … (mean ≈ 1.09) | **Only 1** | Should already be units or sums |
+| **Σ quantity (v0)** | 92,664,860 numeric units | 100.3M rows of 1s | — |
+| **Wait time** | `begin_time`, `end_time` as text | `tiempo_espera_segundos` = end − begin | Use for p50/p90 by store/day |
+| **Dropped vs bronze** | — | `menu_item_ext_ref`, `total_rounding`, `time_card` | Depends on gold DDL |
+| **Added** | `_source_file`, `_n_cols` | wait-time column | KPIs, keys, maybe ticket grain |
+| **Use for EDA?** | Audit parse / original qty | Unit counts, wait, mix | **Presentation layer** |
+| **Download to laptop?** | No | No (100M rows) | Yes only if aggregated |
+
+## Why silver has *more* rows than bronze
+
+Not duplication of files. Each POS **line** with `qty = 2` becomes **two** silver rows.
+
+```{python}
+#| label: fig-waterfall
+#| fig-cap: "From bronze lines to silver units (measured on Delta history)."
+wf = pd.DataFrame({
+    "step": [
+        "Bronze lines",
+        "Σ quantity (v0)",
+        "qty 0→1\n(+7.67M)",
+        "Silver rows",
+    ],
+    "value": [85_180_477, 92_664_860, 7_671_720, 100_336_580],
+})
+ax = wf.plot.bar(x="step", y="value", legend=False, color="#2f6f4e")
+ax.set_ylabel("count")
+ax.set_xlabel("")
+ax.yaxis.set_major_formatter(lambda x, p: f"{x/1e6:.1f} M")
+plt.xticks(rotation=12)
+plt.tight_layout()
+plt.show()
+```
+
+| Check | Value | Verdict |
+|---|---|---|
+| `GROUP BY quantity` on current silver | only `1` — 100,336,580 | Split worked |
+| `filas_esperadas` vs silver rows | both **100,336,580** | No accidental duplicate files |
+| NULL/non-numeric qty on v0 | **1** row | Gap is zeros, not parse junk |
+| Delta history | v0 CTAS 85.2M → v2 drop cols → v3 explode 100.3M | Teammate drops kept |
+
+## CSV schema drift (bronze ingest)
+
+```{python}
+#| label: fig-esquemas
+#| fig-cap: "Same table, three exports (598 files)."
+fam = pd.DataFrame({
+    "family": ["21 cols\n345 files", "19 cols\n168 files", "22 cols\n85 files"],
+    "files": [345, 168, 85],
+})
+ax = fam.plot.bar(x="family", y="files", legend=False, color="#c45c26")
+ax.set_ylabel("files")
+ax.set_xlabel("")
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: fig-extra-cols
+#| fig-cap: "Share of files that include each extra column."
+pres = pd.DataFrame({
+    "column": ["report_group", "tender_type", "total_rounding"],
+    "files_with_col": [430, 430, 85],
+})
+pres["pct"] = 100 * pres["files_with_col"] / 598
+ax = pres.plot.barh(x="column", y="pct", legend=False, color="#5b7c99")
+ax.set_xlabel("% of CSV files")
+ax.set_xlim(0, 100)
+plt.tight_layout()
+plt.show()
+```
+
+**19 columns in every file:** `date`, `begin_time`, `end_time`, `store`, `pos_code`, `check_number`, `menu_item`, `menu_item_ext_ref`, `quantity`, `menu_price`, `total`, `item_discount`, `total_discount`, `tax`, `item_voided`, `order_voided`, `transaction_type`, `pop`, `time_card`.
+
+Spark aligns CSV **by position**. Mixing 19- and 22-column files in one `read.csv` would scramble columns. Bronze read **each family**, then `unionByName(allowMissingColumns=True)`.
+
+## Column dictionary (what to say if asked)
+
+| Column | Layer notes | Meaning |
+|---|---|---|
+| `store` | all | Location |
+| `date`, `begin_time`, `end_time` | timestamps `yyyy-MM-dd HH:mm:ss` | Ticket window |
+| `tiempo_espera_segundos` | **silver+** | `end − begin` (Photon: `try_to_timestamp`) |
+| `menu_item` | all | Product |
+| `report_group` | missing in 168 files | Menu category |
+| `tender_type` | missing in 168 files; **check-level** | Payment; do not `SUM` per line |
+| `quantity` | mixed → 1 in silver | Units |
+| `menu_price`, `total`, `tax`, discounts | all | Money |
+| `total_rounding` | 85 files; dropped in silver | Cents; don’t add twice to `total` |
+| `item_voided`, `order_voided` | all | Cancellations |
+| `pop` | all | Period / promo (POS) |
+
+# Gold live EDA
+
+Sections 1–6 use **gold** when the warehouse is up. If they are empty, quota was exhausted; re-render tomorrow.
+
+# 1. Variable analysis
+
+Types and missingness **on gold**.
+
+```{python}
+if eda["ok"]:
+    eda["describe"]
+else:
+    print("No DESCRIBE — warehouse down. Will fill on next successful render.")
+```
+
+Types and missingness **on gold**.
+
+```{python}
+if eda["ok"]:
+    eda["describe"]
+else:
+    print("No DESCRIBE — warehouse down. Will fill on next successful render.")
+```
+
+```{python}
+#| label: fig-nulls
+#| fig-cap: "Null rate by gold column."
+if eda["ok"] and eda["nulls"] is not None:
+    d = eda["nulls"].sort_values("pct_null", ascending=True)
+    ax = d.plot.barh(x="column", y="pct_null", legend=False, color="#5b7c99")
+    ax.set_xlabel("% null")
+    plt.tight_layout()
+    plt.show()
+    eda["nulls"]
+else:
+    print("No null profile yet.")
+```
+
+# 2. Descriptive statistics
+
+```{python}
+if eda["ok"] and eda["numeric"] is not None:
+    eda["numeric"]
+elif eda["ok"]:
+    print("No numeric columns detected in gold DESCRIBE.")
+else:
+    print("No numeric summary yet.")
+```
+
+# 3. Data visualization
+
+```{python}
+#| label: fig-cats
+#| fig-cap: "Top values of the first categorical gold column."
+if eda["ok"] and eda["cats"]:
+    name, d = next(iter(eda["cats"].items()))
+    ax = d.head(15).plot.bar(x="value", y="n", legend=False, color="#c45c26")
+    ax.set_title(name)
+    ax.set_xlabel("")
+    ax.set_ylabel("rows")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.show()
+else:
+    print("No categorical chart yet.")
+```
+
+```{python}
+if eda["ok"]:
+    eda["preview"]
+else:
+    print("No 5-row preview.")
+```
+
+# 4. Correlation analysis
+
+Pearson on a numeric **sample** from gold (capped at 20k rows), not the full table.
+
+```{python}
+#| label: fig-corr
+#| fig-cap: "Correlation heatmap (gold numeric sample)."
+if eda["ok"] and eda["sample"] is not None and eda["sample"].shape[1] >= 2:
+    s = eda["sample"].apply(pd.to_numeric, errors="coerce")
+    corr = s.corr()
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
+    ax.set_xticks(range(len(corr.columns)))
+    ax.set_yticks(range(len(corr.columns)))
+    ax.set_xticklabels(corr.columns, rotation=60, ha="right")
+    ax.set_yticklabels(corr.columns)
+    fig.colorbar(im, ax=ax, fraction=0.046)
+    plt.tight_layout()
+    plt.show()
+    corr.round(3)
+else:
+    print("Need ≥2 numeric gold columns and a live warehouse.")
+```
+
+# 5. Outlier detection
+
+IQR flags on the numeric sample.
+
+```{python}
+if eda["ok"] and eda["sample"] is not None:
+    s = eda["sample"].apply(pd.to_numeric, errors="coerce")
+    rows = []
+    for c in s.columns:
+        x = s[c].dropna()
+        if x.empty:
+            continue
+        q1, q3 = x.quantile(0.25), x.quantile(0.75)
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        n_out = int(((x < lo) | (x > hi)).sum())
+        rows.append({"column": c, "q1": q1, "q3": q3, "n_outliers": n_out, "pct": round(100 * n_out / len(x), 2)})
+    pd.DataFrame(rows)
+else:
+    print("No outlier table yet.")
+```
+
+# 6. Categorical variables
+
+```{python}
+if eda["ok"] and eda["cats"]:
+    for name, d in eda["cats"].items():
+        print("—", name)
+        print(d.to_string(index=False))
+        print()
+else:
+    print("No categorical frequencies yet.")
+```
+
+# Summary and conclusions
+
+```{python}
+if eda["ok"]:
+    print(f"Live gold: {eda['gold']} ({eda['n']:,} rows).")
+else:
+    print("Gold charts empty until warehouse quota resets.")
+    print("Re-render: quarto render eda/eda_taco_bueno.qmd --to html")
+```
+
+**Pipeline**
+
+1. **Bronze** = faithful dump of 598 CSVs (3 schemas) → 85.2M lines. Good for lineage, bad for “how many burritos”.
+2. **Silver** = one row per unit (100.3M). Right grain for mix and wait time. Watch **7.67M voids** coerced to qty 1.
+3. **Gold** = what we present. Must be aggregated (day×store, product, ticket). Not a folder in `raw/`.
+
+**Do / don’t**
+
+| Do | Don’t |
+|---|---|
+| Union CSV families **by column name** | One `spark.read.csv` on the whole folder |
+| Count units on silver/gold | Treat Catalog’s 100 rows as the dataset |
+| Filter `item_voided` / qty 0 before sales KPIs | Count 100.3M as all sold units |
+| `tender_type` at **check** grain | Sum tender across exploded lines |
+| Wait = `end_time − begin_time` | Add 24h when both fields are full timestamps |
+| Download gold only if small | Zip 100M silver rows to the laptop |
+
+**Limits:** free warehouse may hide live gold plots; no store/item names in this HTML (confidential); `qty 0→1` not reverted.

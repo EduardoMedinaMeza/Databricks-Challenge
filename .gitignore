@@ -3,3 +3,7 @@ graphify-out/
 .venv/
 __pycache__/
 .quarto/
+*_files/
+eda/out/
+*.html
+!README.md
