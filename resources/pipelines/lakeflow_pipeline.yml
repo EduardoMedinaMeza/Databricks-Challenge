@@ -1,0 +1,20 @@
+# Lakeflow / DLT pipeline pointing at transformation folders
+resources:
+  pipelines:
+    taco_bueno_lakeflow:
+      name: taco_bueno_lakeflow
+      catalog: workspace
+      schema: default
+      channel: CURRENT
+      libraries:
+        - glob:
+            include: src/transformations/bronze/**
+        - glob:
+            include: src/transformations/silver/**
+        - glob:
+            include: src/transformations/gold/**
+      configuration:
+        bronze_table: workspace.default.bronze_ventas
+        silver_table: workspace.default.silver_ventas
+        gold_daily_table: workspace.default.gold_daily_store_kpis
+        gold_kpis_table: workspace.default.gold_executive_kpis
