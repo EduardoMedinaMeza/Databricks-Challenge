@@ -1,5 +1,0 @@
-python-dotenv
-pandas
-databricks-sql-connector[pyarrow]
-matplotlib
-pyarrow
