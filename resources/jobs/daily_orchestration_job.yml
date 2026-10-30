@@ -1,40 +1,97 @@
-# Databricks job: bronze → silver → gold
+# Databricks job: bronze → silver → gold → validación
+# Las rutas son relativas a este archivo (resources/jobs/) y van sin extensión, como aparecen en el Git folder.
+# Si algún día se despliega con un bundle, hay que agregarles la extensión que tengan en el repo (.py, .sql o .ipynb).
+
 resources:
   jobs:
     taco_bueno_daily:
       name: taco_bueno_daily
+      description: "Pipeline medallion de ventas: CSV → bronze → silver → gold, con materialized view y validación de calidad al final."
       max_concurrent_runs: 1
+
+      # Diario a las 6:00, en pausa: el extracto es histórico, así que el horario queda definido pero no corre solo.
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: America/Mexico_City
+        pause_status: PAUSED
+
+      email_notifications:
+        on_failure:
+          - a01647192@tec.mx
+          - a01647197@tec.mx
+          - a0174740@tec.mx
+          - a01647200@tec.mx
+          - a01771751@tec.mx
+
       tasks:
         - task_key: extract_csv
+          max_retries: 1
+          min_retry_interval_millis: 60000
           notebook_task:
-            notebook_path: src/transformations/bronze/extract_csv.py
+            notebook_path: ../../src/transformations/01_bronze/01_01_extract_csv
+
         - task_key: bronze_ventas
           depends_on:
             - task_key: extract_csv
+          max_retries: 1
+          min_retry_interval_millis: 60000
           notebook_task:
-            notebook_path: src/transformations/bronze/st_ventas_bronze.py
-        - task_key: silver_unidades
+            notebook_path: ../../src/transformations/01_bronze/01_02_st_ventas_bronze
+
+        - task_key: silver_ventas
           depends_on:
             - task_key: bronze_ventas
+          max_retries: 1
+          min_retry_interval_millis: 60000
           notebook_task:
-            notebook_path: src/transformations/silver/st_ventas_unidades.py
-        - task_key: silver_wait_time
+            notebook_path: ../../src/transformations/02_silver/02_01_silver_ventas
+
+        - task_key: silver_unidades
+          depends_on:
+            - task_key: silver_ventas
+          max_retries: 1
+          min_retry_interval_millis: 60000
+          notebook_task:
+            notebook_path: ../../src/transformations/02_silver/02_02_ventas_unidades
+
+        - task_key: silver_limpieza
           depends_on:
             - task_key: silver_unidades
+          max_retries: 1
+          min_retry_interval_millis: 60000
           notebook_task:
-            notebook_path: src/transformations/silver/st_tiempo_espera.py
-        - task_key: optimize
+            notebook_path: ../../src/transformations/02_silver/02_03_silver_limpieza
+
+        - task_key: silver_optimize
           depends_on:
-            - task_key: silver_wait_time
+            - task_key: silver_limpieza
+          max_retries: 1
+          min_retry_interval_millis: 60000
           notebook_task:
-            notebook_path: src/transformations/silver/optimize_ventas.sql
-        - task_key: gold_daily_store
+            notebook_path: ../../src/transformations/02_silver/02_04_optimize
+
+        - task_key: gold_ventas
           depends_on:
-            - task_key: optimize
+            - task_key: silver_optimize
+          max_retries: 1
+          min_retry_interval_millis: 60000
           notebook_task:
-            notebook_path: src/transformations/gold/st_daily_store_kpis.py
-        - task_key: gold_executive_kpis
+            notebook_path: ../../src/transformations/03_gold/03_01_gold_ventas
+
+        # Las materialized views se crean desde un SQL warehouse, no desde el cómputo serverless de los notebooks.
+        - task_key: gold_mv_dia_tienda
           depends_on:
-            - task_key: gold_daily_store
+            - task_key: gold_ventas
+          max_retries: 1
+          min_retry_interval_millis: 60000
           notebook_task:
-            notebook_path: src/transformations/gold/mv_executive_kpis.sql
+            notebook_path: ../../src/transformations/03_gold/03_02_MV_Dia_Tienda
+            warehouse_id: /sql/1.0/warehouses/c99a16cf66925003
+
+        # Sin reintentos: si los datos no cuadran, volver a correr no arregla nada.
+        - task_key: validacion
+          depends_on:
+            - task_key: gold_ventas
+          max_retries: 0
+          notebook_task:
+            notebook_path: ../../src/validations/01_01_validation

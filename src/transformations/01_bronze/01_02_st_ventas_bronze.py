@@ -1,9 +1,4 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "6"
-# ///
-# Databricks notebook source
 # 3 encabezados CSV → 1 tabla Delta. Una sola acción de escritura.
 
 import csv
