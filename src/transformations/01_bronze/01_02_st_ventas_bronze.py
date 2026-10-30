@@ -111,19 +111,3 @@ bronze = bronze.select(*ordered, *extras)
 
 print(f"lista {TABLE}")
 spark.table(TABLE).printSchema()
-
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT
-# MAGIC   COUNT(*) AS filas,
-# MAGIC   SUM(CAST(quantity AS DOUBLE)) AS unidades,
-# MAGIC   SUM(CASE WHEN CAST(quantity AS DOUBLE) > 1
-# MAGIC            THEN CAST(quantity AS DOUBLE) - 1 ELSE 0 END) AS extras_por_partir,
-# MAGIC   SUM(CASE
-# MAGIC         WHEN CAST(quantity AS DOUBLE) IS NULL OR CAST(quantity AS DOUBLE) < 1 THEN 1
-# MAGIC         WHEN CAST(quantity AS DOUBLE) > 50 THEN 50
-# MAGIC         ELSE CAST(CAST(quantity AS DOUBLE) AS INT)
-# MAGIC       END) AS filas_esperadas_despues
-# MAGIC FROM workspace.default.silver_ventas VERSION AS OF 0
